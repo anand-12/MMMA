@@ -1,0 +1,9 @@
+# Ignore .DS_Store file in Code subfolder
+Code/.DS_Store
+./.DS_STORE
+# Ignore scikit-optimize folder in Code subfolder
+Code/scikit-optimize/
+
+# Ignore .ipynb_checkpoints folder in Code subfolder
+Code/.ipynb_checkpoints/
+
