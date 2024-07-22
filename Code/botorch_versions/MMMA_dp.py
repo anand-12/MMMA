@@ -56,18 +56,44 @@ def fit_model(train_x, train_y, kernel_type):
     fit_gpytorch_mll(mll)
     return model, mll
 
-def calculate_weights(models, mlls, train_x, train_y):
-    log_likelihoods = np.array([mll(models[i](train_x), train_y).sum().item() for i, mll in enumerate(mlls)])
-    max_log_likelihood = np.max(log_likelihoods)
-    log_likelihoods -= max_log_likelihood  
-    weights = np.exp(log_likelihoods) / np.sum(np.exp(log_likelihoods))
-    return weights
+def dynamic_kernel_selection(kernel_performances, t):
+    dp = [[0 for _ in range(len(kernel_performances[0]))] for _ in range(t)]
+    
+    for j in range(len(kernel_performances[0])):
+        dp[0][j] = kernel_performances[0][j]
+    
+    for i in range(1, t):
+        for j in range(len(kernel_performances[0])):
+            dp[i][j] = max(dp[i-1][k] + kernel_performances[i][j] for k in range(len(kernel_performances[0])))
+    
+    best_kernels = []
+    current_best = max(dp[t-1])
+    for i in range(t-1, -1, -1):
+        for j in range(len(kernel_performances[0])):
+            if dp[i][j] == current_best:
+                best_kernels.append(j)
+                if i > 0:
+                    current_best -= kernel_performances[i][j]
+                break
+    
+    return list(reversed(best_kernels))
 
-def select_model(weights):
-    return np.random.choice(len(weights), p=weights)
+def adaptive_learning_rate(past_rewards, t):
+    dp = [0] * (t + 1)
+    dp[0] = 0.1  # Initial learning rate
+    
+    for i in range(1, t + 1):
+        if i == 1:
+            dp[i] = dp[i-1]
+        else:
+            if past_rewards[i-1] > past_rewards[i-2]:
+                dp[i] = min(dp[i-1] * 1.1, 1.0)  # Increase learning rate
+            else:
+                dp[i] = max(dp[i-1] * 0.9, 0.01)  # Decrease learning rate
+    
+    return dp[t]
 
-def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gains=None, kernel_types=['RBF', 'Matern', 'RQ'], acq_func_types=['EI', 'UCB', 'PI']):
-
+def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gains=None, kernel_types=['RBF', 'Matern', 'RQ'], acq_func_types=['EI', 'UCB', 'PI'], kernel_performances=None, t=0):
     models = []
     mlls = []
     for kernel in kernel_types:
@@ -75,8 +101,12 @@ def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gain
         models.append(model)
         mlls.append(mll)
 
-    weights = calculate_weights(models, mlls, train_x, train_y)
-    selected_model_index = select_model(weights)
+    if kernel_performances is not None and t > 0:
+        best_kernels = dynamic_kernel_selection(kernel_performances, t)
+        selected_model_index = best_kernels[-1]
+    else:
+        selected_model_index = np.random.choice(len(kernel_types))
+    
     selected_model = models[selected_model_index]
 
     with gpytorch.settings.cholesky_jitter(1e-1):  # Adding jitter
@@ -95,8 +125,8 @@ def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gain
                     acq_function=acq_function, 
                     bounds=bounds, 
                     q=n_points, 
-                    num_restarts=10, 
-                    raw_samples=16, 
+                    num_restarts=20, 
+                    raw_samples=512, 
                     options={"batch_limit": 5, "maxiter": 200}
                 )
         except Exception as e:
@@ -117,12 +147,11 @@ def update_data(train_x, train_y, new_x, new_y):
     return train_x, train_y
 
 def run_experiment(n_iterations, kernel_types, acq_func_types, initial_data):
-    # np.random.seed(42)
     bounds = initial_data["bounds"]
     train_x, train_y, best_init_y = initial_data["train_x"], initial_data["train_y"], initial_data["best_init_y"]
     
     gains = np.zeros(len(acq_func_types))
-    eta = 0.1  
+    past_rewards = []
 
     best_observed_values = []
     chosen_acq_functions = []
@@ -130,10 +159,17 @@ def run_experiment(n_iterations, kernel_types, acq_func_types, initial_data):
     gap_metrics = []
 
     best_init_y = train_y.max().item()
+    kernel_performances = []
 
     for t in range(n_iterations):
         print(f"Number of iterations done: {t}")
-        new_candidates, chosen_acq_index, selected_model_index, selected_model = get_next_points(train_x, train_y, best_init_y, bounds, eta, 1, gains, kernel_types, acq_func_types)
+        
+        eta = adaptive_learning_rate(past_rewards, t) if past_rewards else 0.1
+        
+        new_candidates, chosen_acq_index, selected_model_index, selected_model = get_next_points(
+            train_x, train_y, best_init_y, bounds, eta, 1, gains, kernel_types, acq_func_types, 
+            kernel_performances, t
+        )
         new_results = target_function(new_candidates).unsqueeze(-1)
 
         train_x, train_y = update_data(train_x, train_y, new_candidates, new_results)
@@ -143,7 +179,6 @@ def run_experiment(n_iterations, kernel_types, acq_func_types, initial_data):
         chosen_acq_functions.append(chosen_acq_index)
         selected_models.append(selected_model_index)
 
-        # Calculate gap metric
         g_i = gap_metric(initial_data["best_init_y"], best_init_y, initial_data["true_maximum"])
         gap_metrics.append(g_i)
         
@@ -153,6 +188,14 @@ def run_experiment(n_iterations, kernel_types, acq_func_types, initial_data):
         posterior_mean = selected_model.posterior(new_candidates).mean
         reward = posterior_mean.mean().item()
         gains[chosen_acq_index] += reward
+        past_rewards.append(reward)
+
+        # Refit models and compute log marginal likelihood for kernel performance
+        current_kernel_performance = []
+        for kernel in kernel_types:
+            model, mll = fit_model(train_x, train_y, kernel)
+            current_kernel_performance.append(mll(model(train_x), train_y).item())
+        kernel_performances.append(current_kernel_performance)
 
     return best_observed_values, chosen_acq_functions, selected_models, initial_data["true_maximum"], gap_metrics
 
@@ -160,14 +203,6 @@ def plot_results(results, titles, test_function_name, true_maximum):
     fig, axs = plt.subplots(3, 1, figsize=(10, 18))
 
     for i, (best_observed_values, chosen_acq_functions, selected_models, true_maximum, gap_metrics) in enumerate(results):
-        # axs[i].plot(best_observed_values, marker='o', linestyle='-', color='b', label='Best Objective Value')
-        # axs[i].axhline(y=true_maximum, color='k', linestyle='--', label='True Maxima')
-        # axs[i].set_title(titles[i])
-        # axs[i].set_xlabel("Iteration")
-        # axs[i].set_ylabel("Best Objective Function Value")
-        # axs[i].legend()
-        # axs[i].grid(True)
-
         ax2 = axs[i].twinx()
         ax2.plot(gap_metrics, marker='x', linestyle='-', color='r', label='Gap Metric')
         ax2.set_ylabel("Gap Metric G_i")
@@ -176,11 +211,9 @@ def plot_results(results, titles, test_function_name, true_maximum):
 
     plt.tight_layout()
     plt.savefig(f"test_res.png")
-    # plt.show()
 
-n_iterations = 20
+n_iterations = 50
 
-ackley_bounds = torch.tensor([[-32.768, -32.768], [32.768, 32.768]], dtype=torch.double)
 hart6_bounds = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]], dtype=torch.double)
 init_x, init_y, best_init_y = generate_initial_data(10, n_dim=hart6_bounds.size(1))
 initial_data = {
@@ -201,4 +234,3 @@ results = [results1, results2, results3]
 titles = ["All Models and All Acquisition Functions", "All Models and Only EI", "Only Matern Model and All Acquisition Functions"]
 
 plot_results(results, titles, "Hartmann", true_maxima['Hartmann'])
-
