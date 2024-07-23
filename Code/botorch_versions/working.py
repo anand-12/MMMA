@@ -1,4 +1,3 @@
-from sklearn.linear_model import LinearRegression
 import botorch
 import gpytorch
 import torch
@@ -19,39 +18,8 @@ ackley2 = Ackley(dim=2)
 
 true_maxima = {
     "Hartmann": 3.32237,  
-    "Ackley": 0.0  
+    "Ackley": 0.0,  
 }
-
-class RFF:
-    def __init__(self, input_dim, num_features, sigma=1.0):
-        self.input_dim = input_dim
-        self.num_features = num_features
-        self.sigma = sigma
-        self.W = np.random.normal(scale=1.0/self.sigma, size=(self.input_dim, self.num_features))
-        self.b = np.random.uniform(0, 2 * np.pi, size=self.num_features)
-
-    def transform(self, X):
-        norm = 1.0 / np.sqrt(self.num_features)
-        projection = X @ self.W + self.b
-        return norm * np.sqrt(2.0) * np.concatenate([np.cos(projection), np.sin(projection)], axis=-1)
-    
-class RFFPredictionModel:
-    def __init__(self, model, rff, pred_std):
-        self.model = model
-        self.rff = rff
-        self.pred_std = pred_std
-        self.num_outputs = 1
-
-    def posterior(self, X):
-        X_rff = torch.tensor(self.rff.transform(X.numpy()), dtype=torch.float32)
-        mean = self.model.predict(X_rff)
-        return gpytorch.distributions.MultivariateNormal(
-            torch.tensor(mean, dtype=torch.float32),
-            covariance_matrix=torch.eye(len(mean)) * self.pred_std**2
-        )
-
-    def forward(self, X):
-        return self.posterior(X)
 
 def gap_metric(f_start, f_current, f_star):
     return np.abs((f_start - f_current) / (f_start - f_star))
@@ -70,13 +38,7 @@ def generate_initial_data(n, n_dim):
 
 def fit_model(train_x, train_y, kernel_type):
     if kernel_type == 'RBF':
-        # Use RFF for RBF kernel
-        num_features = 100  # You can adjust this
-        rff = RFF(train_x.shape[1], num_features)
-        X_rff = torch.tensor(rff.transform(train_x.numpy()), dtype=torch.float32)
-        model = LinearRegression()
-        model.fit(X_rff, train_y.numpy())
-        return model, rff
+        covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
     elif kernel_type == 'Matern':
         covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.MaternKernel())
     elif kernel_type == 'RQ':
@@ -95,23 +57,9 @@ def fit_model(train_x, train_y, kernel_type):
     return model, mll
 
 def calculate_weights(models, mlls, train_x, train_y):
-    log_likelihoods = []
-    for i, model in enumerate(models):
-        if isinstance(model, LinearRegression):
-            # For RFF
-            rff = mlls[i]
-            X_rff = torch.tensor(rff.transform(train_x.numpy()), dtype=torch.float32)
-            pred = model.predict(X_rff)
-            mse = np.mean((pred - train_y.numpy())**2)
-            log_likelihood = -mse  # Use negative MSE as a proxy for log-likelihood
-        else:
-            # For GP models
-            log_likelihood = mlls[i](models[i](train_x), train_y).sum().item()
-        log_likelihoods.append(log_likelihood)
-    
-    log_likelihoods = np.array(log_likelihoods)
+    log_likelihoods = np.array([mll(models[i](train_x), train_y).sum().item() for i, mll in enumerate(mlls)])
     max_log_likelihood = np.max(log_likelihoods)
-    log_likelihoods -= max_log_likelihood
+    log_likelihoods -= max_log_likelihood  
     weights = np.exp(log_likelihoods) / np.sum(np.exp(log_likelihoods))
     return weights
 
@@ -119,6 +67,7 @@ def select_model(weights):
     return np.random.choice(len(weights), p=weights)
 
 def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gains=None, kernel_types=['RBF', 'Matern', 'RQ'], acq_func_types=['EI', 'UCB', 'PI']):
+
     models = []
     mlls = []
     for kernel in kernel_types:
@@ -129,16 +78,6 @@ def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gain
     weights = calculate_weights(models, mlls, train_x, train_y)
     selected_model_index = select_model(weights)
     selected_model = models[selected_model_index]
-    selected_mll = mlls[selected_model_index]
-
-    if isinstance(selected_model, LinearRegression):
-        # For RFF
-        rff = selected_mll
-        X_rff = torch.tensor(rff.transform(train_x.numpy()), dtype=torch.float32)
-        pred_mean = selected_model.predict(X_rff)
-        pred_std = np.sqrt(np.mean((pred_mean - train_y.numpy())**2))
-        
-        selected_model = RFFPredictionModel(selected_model, rff, pred_std)
 
     with gpytorch.settings.cholesky_jitter(1e-1):  # Adding jitter
         EI = ExpectedImprovement(model=selected_model, best_f=best_init_y)
@@ -150,16 +89,19 @@ def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gain
     
     candidates_list = []
     for acq_function in acquisition_functions:
-        with gpytorch.settings.cholesky_jitter(1e-1):
-            candidates, acq_value = optimize_acqf(
-                acq_function=acq_function, 
-                bounds=bounds, 
-                q=n_points, 
-                num_restarts=10, 
-                raw_samples=16, 
-                options={"batch_limit": 5, "maxiter": 200}
-            )
-    candidates_list.append(candidates)
+        try:
+            with gpytorch.settings.cholesky_jitter(1e-1):
+                candidates, acq_value = optimize_acqf(
+                    acq_function=acq_function, 
+                    bounds=bounds, 
+                    q=n_points, 
+                    num_restarts=10, 
+                    raw_samples=16, 
+                    options={"batch_limit": 5, "maxiter": 200}
+                )
+        except Exception as e:
+            print(f"Error optimizing acquisition function {acq_function}: {e}")
+        candidates_list.append(candidates)
 
     logits = np.array(gains)
     logits -= np.max(logits)
