@@ -3,7 +3,7 @@ import gpytorch
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from botorch.test_functions import Hartmann, Ackley, Rosenbrock, Levy, Powell
+from botorch.test_functions import Hartmann, Ackley, Rosenbrock, Levy, Powell, Griewank
 from botorch.models import SingleTaskGP
 from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
 from botorch import fit_gpytorch_mll
@@ -15,10 +15,11 @@ warnings.filterwarnings("ignore")
 
 hart6 = Hartmann(dim=6)
 ackley2 = Ackley(dim=2)
-
+griewank2 = Griewank(dim=2)
 true_maxima = {
     "Hartmann": 3.32237,  
     "Ackley": 0.0,  
+    "Griewank": 0.0
 }
 
 def gap_metric(f_start, f_current, f_star):
@@ -27,7 +28,7 @@ def gap_metric(f_start, f_current, f_star):
 def target_function(individuals):
     result = []
     for x in individuals:
-        result.append(-1.0 * hart6(x))
+        result.append(-1.0 * griewank2(x))
     return torch.tensor(result, dtype=torch.double)
 
 def generate_initial_data(n, n_dim):
@@ -89,18 +90,18 @@ def get_next_points(train_x, train_y, best_init_y, bounds, eta, n_points=1, gain
     
     candidates_list = []
     for acq_function in acquisition_functions:
-        try:
-            with gpytorch.settings.cholesky_jitter(1e-1):
-                candidates, acq_value = optimize_acqf(
-                    acq_function=acq_function, 
-                    bounds=bounds, 
-                    q=n_points, 
-                    num_restarts=10, 
-                    raw_samples=16, 
-                    options={"batch_limit": 5, "maxiter": 200}
-                )
-        except Exception as e:
-            print(f"Error optimizing acquisition function {acq_function}: {e}")
+        # try:
+        with gpytorch.settings.cholesky_jitter(1e-1):
+            candidates, acq_value = optimize_acqf(
+                acq_function=acq_function, 
+                bounds=bounds, 
+                q=n_points, 
+                num_restarts=10, 
+                raw_samples=16, 
+                options={"batch_limit": 5, "maxiter": 200}
+            )
+        # except Exception as e:
+        # print(f"Error optimizing acquisition function {acq_function}: {e}")
         candidates_list.append(candidates)
 
     logits = np.array(gains)
@@ -182,13 +183,14 @@ n_iterations = 20
 
 ackley_bounds = torch.tensor([[-32.768, -32.768], [32.768, 32.768]], dtype=torch.double)
 hart6_bounds = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]], dtype=torch.double)
-init_x, init_y, best_init_y = generate_initial_data(10, n_dim=hart6_bounds.size(1))
+griewank_bounds = torch.tensor([[-600.0, -600.0], [600.0, 600.0]], dtype=torch.double)
+init_x, init_y, best_init_y = generate_initial_data(10, n_dim=griewank_bounds.size(1))
 initial_data = {
     "train_x": init_x,
     "train_y": init_y,
     "best_init_y": best_init_y,
-    "bounds": hart6_bounds,
-    "true_maximum": true_maxima['Hartmann']
+    "bounds": griewank_bounds,
+    "true_maximum": true_maxima['Griewank']
 }
 
 results1 = run_experiment(n_iterations, ['RBF', 'Matern', 'RQ'], ['EI', 'UCB', 'PI'], initial_data)
@@ -200,5 +202,5 @@ results3 = run_experiment(n_iterations, ['Matern'], ['EI', 'UCB', 'PI'], initial
 results = [results1, results2, results3]
 titles = ["All Models and All Acquisition Functions", "All Models and Only EI", "Only Matern Model and All Acquisition Functions"]
 
-plot_results(results, titles, "Hartmann", true_maxima['Hartmann'])
+plot_results(results, titles, "Griewank", true_maxima['Griewank'])
 

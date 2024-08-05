@@ -20,7 +20,7 @@ true_maxima = {
     "Hartmann": 3.32237,  
     "Ackley": 0.0,  
 }
-
+# don't return mvn, return posteior of MVN,
 def gap_metric(f_start, f_current, f_star):
     return np.abs((f_start - f_current) / (f_start - f_star))
 

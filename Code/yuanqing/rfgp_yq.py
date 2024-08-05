@@ -214,17 +214,23 @@ class RfgpModel():
             # progress_bar.set_postfix(loss=f"{loss / x.shape[0]:.3f}")
 
         return #self.model
+    ###################
+    ## just from here
+    ##########
     def posterior(self, X: Tensor, posterior_transform = None, *args, **kwargs) -> Tensor:
         predictive = Predictive(self.model, guide = self.guide, num_samples=1)
         preds = predictive(X)
+        print(f"preds: {preds}")
         y_pred = preds['obs'].squeeze().detach()
         print(y_pred.shape)
-        print(y_pred.mean(axis = 0))
-        print(np.cov(y_pred.squeeze(), rowvar=False))
+        # print(y_pred.mean(axis = 0))
+        # print(np.cov(y_pred.squeeze(), rowvar=False))
         cov_m = torch.tensor(np.cov(y_pred.squeeze(), rowvar=False))
+        print(f"cov_m : {cov_m.shape}")
         # y_pred = preds['obs'].cpu().detach().numpy().mean(axis=0)
         # posterior = GPyTorchPosterior(TorchPosterior(Posterior(x=X,model=self.model,guide=self.guide)))
-        posterior = GPyTorchPosterior(torch.distributions.MultivariateNormal(loc=y_pred.mean(axis = 0),covariance_matrix= torch.eye(y_pred.shape[1])))#有空了给他开根号
+        posterior = GPyTorchPosterior(torch.distributions.MultivariateNormal(loc=y_pred.mean(axis = 0),covariance_matrix= cov_m))#有空了给他开根号
+        # print(posterior.mean, posterior.variance)
         return posterior #y_pred
 
 # class Posterior():
