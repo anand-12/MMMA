@@ -217,21 +217,49 @@ class RfgpModel():
     ###################
     ## just from here
     ##########
-    def posterior(self, X: Tensor, posterior_transform = None, *args, **kwargs) -> Tensor:
-        predictive = Predictive(self.model, guide = self.guide, num_samples=1)
+    # def posterior(self, X: Tensor, posterior_transform = None, *args, **kwargs) -> Tensor:
+    #     predictive = Predictive(self.model, guide = self.guide, num_samples=1)
+    #     preds = predictive(X)
+    #     # print(f"preds: {preds}")
+    #     y_pred = preds['obs'].squeeze().detach()
+    #     # print(y_pred.shape)
+    #     # print(y_pred.mean(axis = 0))
+    #     # print(np.cov(y_pred.squeeze(), rowvar=False))
+    #     cov_m = torch.tensor(np.cov(y_pred.squeeze(), rowvar=False))
+    #     #add a small constant for positive semi definite
+    #     eps = 1e-6  # Small positive value
+    #     cov_m += torch.eye(cov_m.shape[0]) * eps
+    #     # print(f"cov_m : {cov_m.shape}")
+    #     # y_pred = preds['obs'].cpu().detach().numpy().mean(axis=0)
+    #     # posterior = GPyTorchPosterior(TorchPosterior(Posterior(x=X,model=self.model,guide=self.guide)))
+    #     posterior = GPyTorchPosterior(torch.distributions.MultivariateNormal(loc=y_pred.mean(axis = 0),covariance_matrix= cov_m))#有空了给他开根号
+    #     # print(posterior.mean, posterior.variance)
+    #     return posterior #y_pred
+
+    def posterior(self, X: Tensor, posterior_transform=None, *args, **kwargs) -> GPyTorchPosterior:
+        predictive = Predictive(self.model, guide=self.guide, num_samples=100)
         preds = predictive(X)
-        print(f"preds: {preds}")
-        y_pred = preds['obs'].squeeze().detach()
-        print(y_pred.shape)
-        # print(y_pred.mean(axis = 0))
-        # print(np.cov(y_pred.squeeze(), rowvar=False))
-        cov_m = torch.tensor(np.cov(y_pred.squeeze(), rowvar=False))
-        print(f"cov_m : {cov_m.shape}")
-        # y_pred = preds['obs'].cpu().detach().numpy().mean(axis=0)
-        # posterior = GPyTorchPosterior(TorchPosterior(Posterior(x=X,model=self.model,guide=self.guide)))
-        posterior = GPyTorchPosterior(torch.distributions.MultivariateNormal(loc=y_pred.mean(axis = 0),covariance_matrix= cov_m))#有空了给他开根号
-        # print(posterior.mean, posterior.variance)
-        return posterior #y_pred
+        y_pred = preds['obs'].detach()  # Shape: [num_samples, batch_size, output_dim]
+
+        # Calculate mean across samples
+        mean = y_pred.mean(dim=0)  # Shape: [batch_size, output_dim]
+
+        # Calculate covariance
+        y_centered = y_pred - mean.unsqueeze(0)
+        cov_m = torch.bmm(y_centered.transpose(1, 2), y_centered).mean(dim=0) / (y_pred.size(0) - 1)
+
+        # Ensure positive definiteness
+        eps = 1e-6
+        cov_m += torch.eye(cov_m.size(0)) * eps
+
+        # If we have a batch of inputs, we need to create a batch of MultivariateNormal distributions
+        if mean.dim() == 2:
+            batch_mvn = torch.distributions.MultivariateNormal(loc=mean, covariance_matrix=cov_m)
+        else:
+            # If we have a single input, we need to squeeze the batch dimension
+            batch_mvn = torch.distributions.MultivariateNormal(loc=mean.squeeze(), covariance_matrix=cov_m.squeeze())
+
+        return GPyTorchPosterior(batch_mvn)
 
 # class Posterior():
 #     def __init__(self):
@@ -252,7 +280,7 @@ class RfgpModel():
 if __name__ == "__main__":
 
     cwd = os.getcwd()
-    print(cwd)
+    # print(cwd)
 
     X_train_path = os.path.join(cwd, "synthetic_1_fold_1_X_train.txt")
     X_test_path = os.path.join(cwd, "synthetic_1_fold_1_X_test.txt")
@@ -274,7 +302,7 @@ if __name__ == "__main__":
     y_test = torch.from_numpy(y_val).float()
 
 
-    print(y_train.shape)
+    # print(y_train.shape)
 
     wst = RfgpModel(in_dim=1, out_dim=6, J=10)
     # print(wst.fit)
@@ -283,4 +311,5 @@ if __name__ == "__main__":
     # predictive1 = Predictive(wst.model, guide=wst.guide, num_samples=5)
     # preds1 = predictive1(x_test)
     # y_pred1 = preds1['obs']
-    print(wst.posterior(X=x_test))
+    print(type(wst))
+    # print(wst.posterior(X=x_test))
